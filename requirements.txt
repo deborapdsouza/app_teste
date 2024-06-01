@@ -7,3 +7,6 @@ pandas==1.3.5
 matplotlib==3.5.1
 altair==4.2.2
 vega_datasets==0.9.0
+geopandas
+folium
+ipyleaflet
