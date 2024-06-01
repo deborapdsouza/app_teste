@@ -1,13 +1,11 @@
 import geemap
 import geemap.foliumap as geemap
 import ee
-import streamlit as st 
-import streamlit_folium
+import streamlit as st
 from streamlit_folium import folium_static
 import plotly.express as px
 import pandas as pd
-import matplotlib.pyplot as plt
-from datetime import datetime 
+from datetime import datetime
 
 # Configuração da página
 st.set_page_config(layout="wide")
@@ -18,17 +16,18 @@ st.divider()
 st.sidebar.markdown("""Esta aplicação desenvolvida para visualização dos dados do Sentinel 2 utilizadas no cálculo de séries temporais de NDVI para municípios brasileiros""")
 
 # Login geemap
-m = geemap.Map()  # Usar configuração padrão e evitar basemaps problemáticos
+ee.Initialize()
 
-# Inseri roi 
+# Inserir roi
 roi = ee.FeatureCollection('users/scriptsremoteambgeo/BR_Mun_2022')
 
-# Botão de filtro da roi 
+# Botão de filtro da roi
+# Adicionar um seletor de município
 lista_estados = sorted(list(roi.aggregate_array('SIGLA_UF').distinct().getInfo()))
 estado = st.selectbox("Selecione o município:", lista_estados)
 roi_estado = roi.filter(ee.Filter.eq('SIGLA_UF', ee.String(estado)))
 
-# Seleção do município 
+# Seleção do município
 lista_municipios = sorted(list(roi_estado.aggregate_array('NM_MUN').distinct().getInfo()))
 municipio = st.selectbox("Selecione o município:", lista_municipios)
 roi_municipio = roi_estado.filter(ee.Filter.eq('NM_MUN', ee.String(municipio)))
@@ -46,21 +45,22 @@ def maskCloudAndShadowsSR(image):
     mask = (cloud.And(snow)).And(cirrus.neq(1)).And(shadow.neq(1))
     return image.updateMask(mask).select('B.*').multiply(0.0001).set('data', image.date().format('YYYY-MM-dd')).copyProperties(image, image.propertyNames())
 
+# Cálculo do índice
 def index(image):
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('ndvi')
     evi = image.expression(
         '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
         {
-            'NIR': image.select('B8'),
-            'RED': image.select('B4'),
-            'BLUE': image.select('B2')
+            'NIR': image.select('B8'),  # Infravermelho próximo
+            'RED': image.select('B4'),  # Vermelho
+            'BLUE': image.select('B2')  # Azul
         }
     ).rename('evi')
     savi = image.expression(
         '((NIR - RED) / (NIR + RED + L)) * (1 + L)',
         {
-            'NIR': image.select('B8'),
-            'RED': image.select('B4'),
+            'NIR': image.select('B8'),  # Infravermelho próximo
+            'RED': image.select('B4'),  # Vermelho
             'L': 0.5  # Fator de ajuste do solo (0.5 para vegetação)
         }
     ).rename('savi')
@@ -82,30 +82,32 @@ end_date = st.sidebar.text_input('Data de Fim', value=formatted_dia_hoje)
 # Slider para selecionar o percentual máximo de nuvens
 max_cloud_percentage = st.sidebar.slider('Percentual Máximo de Nuvens', min_value=0, max_value=100, value=5)
 
-# ImageCollection
-collection = ee.ImageCollection("COPERNICUS/S2_SR")\
-    .filterBounds(roi_municipio)\
-    .filterDate(start_date, end_date)\
-    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', max_cloud_percentage))\
-    .map(maskCloudAndShadowsSR)\
-    .map(index)\
+# ImagemCollection
+collection = ee.ImageCollection("COPERNICUS/S2_SR") \
+    .filterBounds(roi_municipio) \
+    .filterDate(start_date, end_date) \
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', max_cloud_percentage)) \
+    .map(maskCloudAndShadowsSR) \
+    .map(index) \
     .select(['ndvi', 'savi', 'evi'])
 
 # Selecione a imagem para aparecer no layer
 data_images = list((collection.aggregate_array('data').distinct().getInfo()))
+# Entrada de datas no Streamlit
 data_select = st.selectbox('Selecione a data da imagem', data_images)
 
 # Imagem selecionada
 image_select = collection.filter(ee.Filter.eq('data', data_select)).median()
 
 # Visualização dos dados
-m.add_basemap('HYBRID')
+m = geemap.Map()
+m.add_basemap('SATELLITE')
 m.addLayer(roi_municipio, {}, 'Município')
 m.addLayer(image_select.select('ndvi'), {'palette': ['red', 'yellow', 'green'], 'min': 0, 'max': 0.7}, 'NDVI {}'.format(str(data_select)))
 m.addLayer(image_select.select('evi'), {'palette': ['red', 'yellow', 'green'], 'min': 0, 'max': 0.7}, 'EVI {}'.format(str(data_select)))
 m.addLayer(image_select.select('savi'), {'palette': ['red', 'yellow', 'green'], 'min': 0, 'max': 0.7}, 'SAVI {}'.format(str(data_select)))
 m.centerObject(roi_municipio, 10)
-m.to_streamlit()
+folium_static(m)
 
 # Estatística
 def reduce(image):
@@ -114,10 +116,16 @@ def reduce(image):
         'reducer': ee.Reducer.mean(),
         'scale': 30
     })
+
     serie_reduce = serie_reduce.map(lambda f: f.set({'data': image.get('data')}))
+
     return serie_reduce.copyProperties(image, image.propertyNames())
 
-data_reduce = collection.map(reduce).flatten().sort('data', True).select(['NM_MUN', 'data', 'evi', 'ndvi', 'savi'])
+# Aplicando a função de redução na Coleção
+data_reduce = collection.map(reduce) \
+    .flatten() \
+    .sort('data', True) \
+    .select(['NM_MUN', 'data', 'evi', 'ndvi', 'savi'])
 
 st.divider()
 df_stats = geemap.ee_to_df(data_reduce)
@@ -144,5 +152,6 @@ with col1:
 with col2:
     st.dataframe(df_stats, width=600, height=400)
 
+# Finalização do APP
 st.divider()
-st.sidebar.markdown('Desenvolvido por [AmbGEO](https://ambgeo.com/)')
+st.sidebar.markdown('Desenvolvido por [AmbGEO]("https://ambgeo.com/")')
